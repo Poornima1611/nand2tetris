@@ -1,0 +1,132 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/05/CPU.hdl
+
+/**
+ * The Hack CPU (Central Processing unit), consisting of an ALU,
+ * two registers named A and D, and a program counter named PC.
+ * The CPU is designed to fetch and execute instructions written in 
+ * the Hack machine language. In particular, functions as follows:
+ * Executes the inputted instruction according to the Hack machine 
+ * language specification. The D and A in the language specification
+ * refer to CPU-resident registers, while M refers to the external
+ * memory location addressed by A, i.e. to Memory[A]. The inM input 
+ * holds the value of this location. If the current instruction needs 
+ * to write a value to M, the value is placed in outM, the address 
+ * of the target location is placed in the addressM output, and the 
+ * writeM control bit is asserted. (When writeM==0, any value may 
+ * appear in outM). The outM and writeM outputs are combinational: 
+ * they are affected instantaneously by the execution of the current 
+ * instruction. The addressM and pc outputs are clocked: although they 
+ * are affected by the execution of the current instruction, they commit 
+ * to their new values only in the next time step. If reset==1 then the 
+ * CPU jumps to address 0 (i.e. pc is set to 0 in next time step) rather 
+ * than to the address resulting from executing the current instruction. 
+ */
+
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+    // Decode instruction
+    //  i |  X  X |  a  | c1 c2 c3 c4 c5 c6 | d1 d2 d3 | j1 j2 j3
+    // 15 | 14 13 | 12  | 11 10 09 08 07 06 | 05 04 03 | 02 01 00
+    //                           f          |  A  D  M |  <  =  >
+    //                                                 | ng zr !ng.!zr
+    // e.g: 1 11 0 110111 100 000
+    // reset = 0
+    //
+    // i
+    // 0 - A-instruction
+    // 1 - C-instruction
+
+    // a
+    // 0 - ARegister
+    // 1 - MRegister
+
+    Not(in=instruction[15], out=isAInstruction);
+    Not(in=isAInstruction, out=isCInstruction);
+
+    Not(in=instruction[12], out=isAReg);
+    Not(in=isAReg, out=isMReg);
+
+    // fetch instruction
+    // first MUX between aluOutput and instruction using i-bit
+    Mux16(a=aluOutput, b=instruction, sel=isAInstruction, out=aluOutPutOrInstruction);
+
+    // load or not load into ARegister
+    // TODO: need to consider d1-bit as well from prev instruction also, can we use it again?
+    // may be yes
+    Or(a=isAInstruction, b=instruction[5], out=updateAReg);
+    ARegister(in=aluOutPutOrInstruction, load=updateAReg, out=aRegOut);
+  
+    // second MUX between A and M using a-bit
+    Mux16(a=aRegOut, b=inM, sel=isMReg, out=aRegOrMValue);
+  
+    // DRegister load value from aluOutput or not based on d2-bit and its C-instruction
+    // d2-bit.i-bit
+    And (a=instruction[4], b=isCInstruction, out=updateDReg);
+    DRegister(in=aluOutput, load=updateDReg, out=dRegisterValue);
+  
+    // execute instruction
+    ALU(x=dRegisterValue, y=aRegOrMValue,  zx=instruction[11], nx=instruction[10],   zy=instruction[09], ny=instruction[08], f=instruction[07], no=instruction[06],   out=aluOutput, zr=aluZr, ng=aluNg);
+  
+    // post execution
+    
+    // ALU output
+    Or16(a=aluOutput, b=false, out=outM);
+    
+    // write into M using d3-bit only in case of C-instruction
+    And (a=instruction[3], b=isCInstruction, out=writeM);
+  
+    // address of M using ARegister
+    Or16(a=aRegOut, b=false, out[0..14]=addressM, out[15]=ignoreMSBOfAddressM);
+  
+  
+    // TODO: Optimize: minimize this logic to find to jump or not
+    // check if we need to jump to a new location specified in A Register
+    // (j1.ng or j2.zr or j3.!ng.!zr) or j1.j2.j3
+    // j1.ng or j2.zr 
+    And(a=instruction[2], b=aluNg, out=j1Flag);
+    And(a=instruction[1], b=aluZr, out=j2Flag);
+    Or (a=j1Flag, b=j2Flag, out=j1Orj2Flag);
+  
+    // j3.!(ng+zr) or j1.j2.j3
+    Or (a=aluNg, b=aluZr, out=ngOrZr);
+    Not(in=ngOrZr, out=notAluZrAndnotAluNg);
+    And(a=instruction[0], b=notAluZrAndnotAluNg, out=j3Flag);
+  
+    // j1 j2 j3 with ALU out result flags
+    Or(a=j1Orj2Flag, b=j3Flag, out=j1j2j3FlagWithAluOutFlags);
+  
+    // j1.j2.j3
+    And(a=instruction[2], b=instruction[1], out=j1Andj2);
+    And(a=j1Andj2, b=instruction[0], out=j1Andj2Andj3);
+  
+    // final to jmp or not
+    Or (a=j1j2j3FlagWithAluOutFlags, b=j1Andj2Andj3, out=jumpToAddressInAReg);
+    
+    // only if its a C-instruction load from A-Register
+    And(a=isCInstruction, b=jumpToAddressInAReg, out=loadPCFromAReg);
+  
+    // in case of address instruction it must increment
+  
+    // justIncrement = A-instruction or !jumpToAddressInAReg
+    Not(in=jumpToAddressInAReg, out=notjumpToAddressInAReg);
+    Or (a=isAInstruction, b=notjumpToAddressInAReg, out=justIncrement);
+  
+    // program counter using reset, ARegister, Jump status for load or inc 
+    // and output pc
+    PC(in=aRegOut, load=loadPCFromAReg, inc=justIncrement, reset=reset, out[0..14]=pc, out[15]  =ignoreMSBOfPC); 
+}
