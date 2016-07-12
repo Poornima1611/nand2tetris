@@ -35,5 +35,5 @@ CHIP PC {
 
     // update register
     Register(in=updateValue, load=update, out=existingValue);
-    Or16 (a=existingValue, out=out);
+    Or16 (a=existingValue, b=false, out=out);
 }
